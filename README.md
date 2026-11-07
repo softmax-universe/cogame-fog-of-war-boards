@@ -4,8 +4,8 @@ Two cogs. One board. **You can only see your own stones.**
 
 A merged port of OpenSpiel's hidden-information board games for the Softmax
 Coworld platform, on the
-[cogame-parley](https://github.com/Metta-AI/cogame-parley) technology stack
-(forked from [cogame-babel](https://github.com/Metta-AI/cogame-babel)).
+[cogame-parley](https://github.com/softmax-universe/cogame-parley) technology stack
+(forked from [cogame-babel](https://github.com/softmax-universe/cogame-babel)).
 Phantom Tic-Tac-Toe and Dark Hex: classic boards, classic rules, and a
 referee who tells you exactly one thing — **PLACED** or **OCCUPIED**. The
 only channel through which a seat ever learns anything about its opponent
