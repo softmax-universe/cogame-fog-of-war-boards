@@ -27,7 +27,7 @@
         "/bin/fog-of-war-boards"
       ],
       "env": {},
-      "source_url": "https://github.com/Metta-AI/cogame-fog-of-war-boards/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-fog-of-war-boards/tree/main"
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -413,7 +413,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-fog-of-war-boards/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-fog-of-war-boards/tree/main"
     },
     {
       "id": "fog-of-war-boards-scripted",
@@ -436,7 +436,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-fog-of-war-boards/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-fog-of-war-boards/tree/main"
     }
   ],
   "variants": [
