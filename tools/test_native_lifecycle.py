@@ -36,6 +36,7 @@ for case in (
     "fenced-json-roundtrip",
     "ambiguous-object-rejection",
     "provider-http-401",
+    "provider-http-503",
     "unset-endpoint-model-seat",
     "runtime-failure",
     "malformed-private-json",
@@ -95,9 +96,14 @@ for case in (
                 self.wfile.write(body)
                 entered.set()
                 return
-            if case == "provider-http-401":
-                body = b'{"error": {"message": "invalid api key"}}'
-                self.send_response(401)
+            if case in {"provider-http-401", "provider-http-503"}:
+                status = 401 if case == "provider-http-401" else 503
+                body = (
+                    b'{"error": {"message": "invalid api key"}}'
+                    if status == 401
+                    else b'{"error": {"message": "service unavailable"}}'
+                )
+                self.send_response(status)
                 self.send_header("content-length", str(len(body)))
                 self.send_header("X-Softmax-Llm-Call-Id", str(uuid.uuid4()))
                 self.end_headers()
@@ -219,6 +225,7 @@ for case in (
         "fenced-json-roundtrip",
         "ambiguous-object-rejection",
         "provider-http-401",
+        "provider-http-503",
         "unset-endpoint-model-seat",
         "malformed-private-json",
         "malformed-private-schema",
@@ -233,6 +240,7 @@ for case in (
         "COGAME_RESULTS_URI": (output / "results.json").as_uri(),
         "COGAME_SAVE_REPLAY_URI": (output / "replay.json").as_uri(),
         "COGAME_SAVE_TRAJECTORY_URI": (output / "trajectory.jsonl").as_uri(),
+        "COGAME_PLAYER_FAILURE_URI": (output / "player_failure.json").as_uri(),
         "COWORLD_EPISODE_ID": str(uuid.uuid4()),
         "COWORLD_GAME_VERSION": "native-lifecycle-fixture",
         "COWORLD_SOURCE_REVISION": SOURCE,
@@ -304,6 +312,7 @@ for case in (
             "fenced-json-roundtrip",
             "ambiguous-object-rejection",
             "provider-http-401",
+            "provider-http-503",
             "unset-endpoint-model-seat",
             "runtime-failure",
             "malformed-private-json",
@@ -324,6 +333,7 @@ for case in (
                 "fenced-json-roundtrip",
                 "ambiguous-object-rejection",
                 "provider-http-401",
+                "provider-http-503",
                 "unset-endpoint-model-seat",
                 "malformed-private-json",
                 "malformed-private-schema",
@@ -342,6 +352,7 @@ for case in (
                 "repair-deadline",
                 "ambiguous-object-rejection",
                 "provider-http-401",
+                "provider-http-503",
                 "unset-endpoint-model-seat",
             }
             else (exit_code == 0)
@@ -396,6 +407,7 @@ for case in (
             results = json.loads((output / "results.json").read_text())
             assert results["reason"] == "complete" and results["plies"] == 4
             assert (output / "replay.json").exists()
+            assert not (output / "player_failure.json").exists()
             print(case, "fenced JSON accepted and completed", flush=True)
             continue
         if case == "ambiguous-object-rejection":
@@ -411,6 +423,11 @@ for case in (
                 not (output / "results.json").exists()
                 and not (output / "replay.json").exists()
             )
+            player_failure = json.loads((output / "player_failure.json").read_text())
+            assert set(player_failure) == {"failed_policy_index", "kind", "message"}
+            assert player_failure["failed_policy_index"] == 0
+            assert player_failure["kind"] == "player_error"
+            assert 1 <= len(player_failure["message"]) <= 2000
             decision = events[0]
             assert (
                 decision["action_status"] == "rejected"
@@ -422,7 +439,7 @@ for case in (
             )
             print(case, "ambiguous multi-object rejected and failed unscored", flush=True)
             continue
-        if case in {"provider-http-401", "unset-endpoint-model-seat"}:
+        if case in {"provider-http-401", "provider-http-503", "unset-endpoint-model-seat"}:
             assert (
                 episode["status"] == "failed"
                 and episode["participant_outcomes"] is None
@@ -435,6 +452,11 @@ for case in (
                 not (output / "results.json").exists()
                 and not (output / "replay.json").exists()
             )
+            player_failure = json.loads((output / "player_failure.json").read_text())
+            assert set(player_failure) == {"failed_policy_index", "kind", "message"}
+            assert player_failure["failed_policy_index"] == 0
+            assert player_failure["kind"] == "episode_inconclusive"
+            assert 1 <= len(player_failure["message"]) <= 2000
             decision = events[0]
             assert (
                 decision["action_status"] == "missing"
@@ -443,10 +465,12 @@ for case in (
                 and decision["fallback_origin"] is None
                 and decision["terminal"] is True
             )
-            if case == "provider-http-401":
+            if case in {"provider-http-401", "provider-http-503"}:
+                expected_status = 401 if case == "provider-http-401" else 503
                 assert len(decision["attempts"]) == 1
-                assert decision["attempts"][0]["http_status"] == 401
-                assert "401" in decision["attempts"][0]["rejection_reason"]
+                assert decision["attempts"][0]["http_status"] == expected_status
+                assert str(expected_status) in decision["attempts"][0]["rejection_reason"]
+                assert str(expected_status) in player_failure["message"]
             else:
                 assert decision["attempts"] == []
             print(case, "infra failure terminated unscored with no fallback", flush=True)
@@ -464,6 +488,12 @@ for case in (
                 not (output / "results.json").exists()
                 and not (output / "replay.json").exists()
             )
+            player_failure = json.loads((output / "player_failure.json").read_text())
+            assert set(player_failure) == {"failed_policy_index", "kind", "message"}
+            assert player_failure["failed_policy_index"] == 0
+            assert player_failure["kind"] == "episode_inconclusive"
+            assert 1 <= len(player_failure["message"]) <= 2000
+            assert "private-schema-sentinel" not in player_failure["message"]
             for decision in events[:-1]:
                 assert (
                     decision["action_status"] == "missing"
@@ -516,6 +546,7 @@ for case in (
             assert (
                 not (output / "results.json").exists()
                 and not (output / "replay.json").exists()
+                and not (output / "player_failure.json").exists()
             )
             (output / "proof.json").write_text(
                 json.dumps(

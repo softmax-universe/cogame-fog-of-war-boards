@@ -97,7 +97,11 @@ coworld upload-policy <fog-of-war-boards-image> --name my-fog \
 
 A rejected reply gets one retry with the legal choices; a second invalid reply,
 missing `COWORLD_LLM_ENDPOINT`, provider/transport error, timeout, or disconnect
-terminates the episode unscored as failed instead of substituting a fallback move.
+terminates the episode unscored as failed (exiting nonzero without writing
+`results.json` or replay, and recording the failing seat to
+`COGAME_PLAYER_FAILURE_URI` as `player_error` for rejected replies or
+`episode_inconclusive` for provider/transport/endpoint failures) instead of
+substituting a fallback move.
 
 Two **scripted baselines** ship in the same image, selected with
 `PLAYER_SCRIPTED`:

@@ -91,6 +91,8 @@ type
     started: bool
     finished: bool
     episodeFailed: bool
+    episodeFailedSeat: int
+    episodeFailedPhase: string
     episodeFailureCategory: string
     episodeFailureReason: string
 
@@ -184,6 +186,26 @@ proc writeArtifact(uri, data, contentType, methodEnv: string, cleanupDeadline: M
     of "POST": ahPost
     else: raise newException(ValueError, "unsupported artifact method")
   writeCogameArtifact(uri, data, contentType, methodEnv, cleanupDeadline, httpMethod)
+
+proc playerFailureKind(category: string): string =
+  if category == "model_rejected": "player_error"
+  else: "episode_inconclusive"
+
+proc playerFailurePayload(seat: int, category, phase, reason: string): JsonNode =
+  let kind = playerFailureKind(category)
+  let detail = cleanText(oneLine(reason), 1800)
+  let message =
+    if detail.len > 0 and phase.len > 0:
+      cleanText("seat " & $seat & " failed in " & phase & " phase: " & detail, 2000)
+    elif detail.len > 0:
+      cleanText("seat " & $seat & " failed: " & detail, 2000)
+    else:
+      "seat " & $seat & " failed (" & kind & ")"
+  %*{
+    "failed_policy_index": seat,
+    "kind": kind,
+    "message": message
+  }
 
 proc waitUntil(deadline: MonoTime) =
   while getMonoTime() < deadline and not interruptionRequested():
@@ -287,7 +309,8 @@ proc issueExternalPhase(gs: var GameState, seat: int, retry: bool) =
     else: gs.playerSockets[seat].send($decision)
 
 proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
-    failed = false, failureCategory = "", failureReason = "") =
+    failed = false, failedSeat = -1, failedPhase = "",
+    failureCategory = "", failureReason = "") =
   let cleanupDeadline = min(episodeDeadline, getMonoTime() + initDuration(seconds = 5))
   var interrupted = interruptionRequested() or failed
   var targets: seq[int]
@@ -295,6 +318,10 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
     if state.finished: return
     if failed:
       state.episodeFailed = true
+      if failedSeat >= 0 and failedSeat < state.config.players.len:
+        state.episodeFailedSeat = failedSeat
+      if failedPhase.len > 0:
+        state.episodeFailedPhase = failedPhase
       if failureCategory.len > 0: state.episodeFailureCategory = failureCategory
       elif state.episodeFailureCategory.len == 0: state.episodeFailureCategory = "runtime_error"
       if failureReason.len > 0: state.episodeFailureReason = failureReason
@@ -322,6 +349,7 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
       if slot notin state.stoppedSlots: interrupted = true
   var results, privateOutcome: JsonNode
   var replayData: string
+  var playerFailureData = ""
   withLock stateLock:
     if state.finished: return
     state.finished = true
@@ -336,6 +364,11 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
         "plies": state.sim.plies,
         "player_cleanup": cleanup
       }
+      if state.episodeFailedSeat >= 0 and
+          state.episodeFailedSeat < state.config.players.len:
+        playerFailureData = $playerFailurePayload(
+          state.episodeFailedSeat, state.episodeFailureCategory,
+          state.episodeFailedPhase, state.episodeFailureReason)
     else:
       privateOutcome = copy(results)
       privateOutcome["player_cleanup"] = cleanup
@@ -379,6 +412,9 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
       of "POST": ahPost
       else: raise newException(ValueError, "unsupported artifact method")
     writeTrajectoryArtifact(state.trajectory.get(), getEnv(CogameSaveTrajectoryUriEnv), cleanupDeadline, trajectoryMethod)
+  if playerFailureData.len > 0:
+    writeArtifact(getEnv("COGAME_PLAYER_FAILURE_URI"), playerFailureData,
+      "application/json", "COGAME_PLAYER_FAILURE_METHOD", cleanupDeadline)
   if interrupted: return
   writeArtifact(runtimeConfig.resultsUri, $results, "application/json",
     "COGAME_RESULTS_METHOD", cleanupDeadline)
@@ -509,6 +545,8 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
     let spacing = config.plySpacing()
     var lastLlmStart = none(MonoTime)
     var episodeFailed = false
+    var failedSeat = -1
+    var failedPhase = ""
     var failureCategory = ""
     var failureReason = ""
 
@@ -591,7 +629,10 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             state.recordPhase(simCopy, mover, "sense", Decision(), attempts,
               applied = false, rejected = isModelRejected)
             echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover],
-              " failed in sense phase (", failureCategory, ")"
+              " failed in sense phase (", failureCategory, "): ",
+              cleanText(oneLine(failureReason), MaxErrorLen)
+          failedSeat = mover
+          failedPhase = "sense"
           episodeFailed = true
           break
         let senseDecision = sense.get()
@@ -635,7 +676,10 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           state.recordPhase(simCopy, mover, "attempt", Decision(), attempts,
             applied = false, rejected = isModelRejected)
           echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover],
-            " failed in attempt phase (", failureCategory, ")"
+            " failed in attempt phase (", failureCategory, "): ",
+            cleanText(oneLine(failureReason), MaxErrorLen)
+        failedSeat = mover
+        failedPhase = "attempt"
         episodeFailed = true
         break
       let attemptDecision = decision.get()
@@ -655,6 +699,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
     if episodeFailed:
       finalizationStarted = true
       finishEpisode(runtimeConfig, episodeDeadline, failed = true,
+        failedSeat = failedSeat, failedPhase = failedPhase,
         failureCategory = failureCategory, failureReason = failureReason)
       return
 
@@ -1019,6 +1064,8 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
   state.registered = newSeq[bool](config.players.len)
   state.pendingSeat = -1
   state.episodeFailed = false
+  state.episodeFailedSeat = -1
+  state.episodeFailedPhase = ""
   state.episodeFailureCategory = ""
   state.episodeFailureReason = ""
   runtimeConfigGlobal = runtimeConfig
@@ -1042,4 +1089,6 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
     else:
       finishEpisode(runtimeConfig, getMonoTime() + initDuration(seconds = 5), failed = not wasInterrupted)
   if state.episodeFailed:
-    quit("fogboards: episode failed (" & state.episodeFailureCategory & ")", 1)
+    let detail = cleanText(oneLine(state.episodeFailureReason), MaxErrorLen)
+    quit("fogboards: episode failed (" & state.episodeFailureCategory &
+      (if detail.len > 0: ": " & detail else: "") & ")", 1)
