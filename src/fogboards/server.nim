@@ -56,7 +56,6 @@ type
     trajectory: Option[DecisionTrajectory]
     externalAttempts: seq[DecisionAttempt]
     externalRejections: int
-    externalFallback: bool
     selection: PromptSelection
     config: GameConfig
     sim: Sim
@@ -83,6 +82,7 @@ type
     pendingSense: int
     pendingDecision: Decision
     pendingAccepted: bool
+    pendingFailed: bool
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -385,16 +385,16 @@ proc awaitExternalPhase(sim: Sim, mover: int, phase: ExternalPhase,
       state.pendingPhase = phase
       state.phaseDeadline = deadline
       state.pendingAccepted = false
+      state.pendingFailed = false
       state.externalAttempts = @[]
       state.externalRejections = 0
-      state.externalFallback = false
       if phase == epSense: state.pendingSense = -1
       connected = state.playerSockets.hasKey(mover)
       state.issueExternalPhase(mover, retry = false)
     while connected and getMonoTime() < deadline and not interruptionRequested():
       withLock stateLock:
-        if state.pendingAccepted:
-          result = true
+        if state.pendingAccepted or state.pendingFailed:
+          result = state.pendingAccepted
           break
         connected = state.playerSockets.hasKey(mover)
       sleep(10)
@@ -404,12 +404,16 @@ proc awaitExternalPhase(sim: Sim, mover: int, phase: ExternalPhase,
         for attempt in state.externalAttempts.mitems:
           attempt.accepted = false
           if attempt.rejectionReason.isNone:
-            attempt.rejectionReason = some(if interruptionRequested(): "native_interrupted" else: "phase_deadline")
+            attempt.rejectionReason = some(
+              if interruptionRequested(): "native_interrupted"
+              elif not state.playerSockets.hasKey(mover): "player_disconnected"
+              else: "phase_deadline")
       state.pendingSeat = -1
       state.pendingPhase = epNone
 
 proc recordPhase(gs: var GameState, before: Sim, seat: int, phase: string,
-    decision: Decision, attempts: seq[DecisionAttempt], applied = true) =
+    decision: Decision, attempts: seq[DecisionAttempt], applied = true,
+    rejected = false) =
   if gs.trajectory.isNone: return
   let action = if applied: gs.sim.phaseAction(decision, phase) else: newJNull()
   var selected = none(string)
@@ -422,13 +426,18 @@ proc recordPhase(gs: var GameState, before: Sim, seat: int, phase: string,
       {"role": "user", "content": userPrompt(before, seat, gs.prompts[seat], phase)}]
   view["prompt_template"] = gs.selection.promptMetadata(
     messages[0]["content"].getStr(), messages[1]["content"].getStr())
+  let status =
+    if not applied:
+      if rejected: asRejected else: asMissing
+    elif selected.isSome: asAccepted
+    else: asFallback
   gs.pendingPhases.add(PendingPhase(
     decisionId: "fog-" & $before.plies & "-" & $seat & "-" & phase,
     seat: $seat, observation: view, attempts: attempts,
     selected: selected, action: action,
-    status: if not applied: asMissing elif selected.isSome: asAccepted else: asFallback,
+    status: status,
     terminal: gs.sim.done or not applied,
-    fallbackOrigin: if applied and selected.isNone: some("game-" & $gs.baselines[seat]) else: none(string)))
+    fallbackOrigin: if status == asFallback: some("game-" & $gs.baselines[seat]) else: none(string)))
 
 proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
   {.gcsafe.}:
@@ -516,17 +525,15 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
 
       ## Apply the sense before exposing its private window to any policy.
       var anchor = -1
-      var senseFallback = false
       if config.sense > 0:
-        var sense: Decision
+        var sense: Option[Decision]
         var attempts: seq[DecisionAttempt]
         if seatExternal:
           let accepted = awaitExternalPhase(simCopy, mover, epSense, min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)))
           withLock stateLock:
             attempts = state.externalAttempts
-            sense = if accepted: Decision(anchor: state.pendingSense, cell: -1)
-              else: scriptedPhase(simCopy, mover, seatBaseline, "sense")
-            sense.fellBack = not accepted or state.externalFallback
+            if accepted:
+              sense = some(Decision(anchor: state.pendingSense, cell: -1))
         else:
           sense = client.decidePhase(simCopy, mover, seatPrompt, seatBaseline,
             seatScripted, "sense", min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)), state.selection)
@@ -536,26 +543,33 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             for attempt in attempts.mitems:
               attempt.accepted = false
               attempt.rejectionReason = some("native_interrupted")
-            state.recordPhase(simCopy, mover, "sense", sense, attempts, applied = false)
+            state.recordPhase(simCopy, mover, "sense", Decision(), attempts, applied = false)
           break
-        anchor = sense.anchor
-        senseFallback = sense.fellBack
+        if sense.isNone:
+          withLock stateLock:
+            if state.sim.done: break
+            state.sim.forfeit(mover)
+            state.recordPhase(simCopy, mover, "sense", Decision(), attempts, applied = false, rejected = true)
+            echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover], " forfeited in sense phase"
+            state.broadcastLocked()
+          break
+        let senseDecision = sense.get()
+        anchor = senseDecision.anchor
         withLock stateLock:
           state.sim.applySense(mover, anchor)
           state.pendingSense = anchor
-          state.recordPhase(simCopy, mover, "sense", sense, attempts)
+          state.recordPhase(simCopy, mover, "sense", senseDecision, attempts)
           state.broadcastLocked()
           simCopy = state.sim
 
-      var decision: Decision
+      var decision: Option[Decision]
       var attempts: seq[DecisionAttempt]
       if seatExternal:
         let accepted = awaitExternalPhase(simCopy, mover, epAttempt, min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)))
         withLock stateLock:
           attempts = state.externalAttempts
-          decision = if accepted: state.pendingDecision
-            else: scriptedPhase(simCopy, mover, seatBaseline, "attempt", anchor)
-          decision.fellBack = not accepted or state.externalFallback
+          if accepted:
+            decision = some(state.pendingDecision)
       else:
         decision = client.decidePhase(simCopy, mover, seatPrompt, seatBaseline,
           seatScripted, "attempt", min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)), state.selection, anchor)
@@ -565,16 +579,24 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           for attempt in attempts.mitems:
             attempt.accepted = false
             attempt.rejectionReason = some("native_interrupted")
-          state.recordPhase(simCopy, mover, "attempt", decision, attempts, applied = false)
+          state.recordPhase(simCopy, mover, "attempt", Decision(), attempts, applied = false)
         break
+      if decision.isNone:
+        withLock stateLock:
+          if state.sim.done: break
+          state.sim.forfeit(mover)
+          state.recordPhase(simCopy, mover, "attempt", Decision(), attempts, applied = false, rejected = true)
+          echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover], " forfeited in attempt phase"
+          state.broadcastLocked()
+        break
+      let attemptDecision = decision.get()
       withLock stateLock:
         if state.sim.done: break
-        if decision.fellBack or senseFallback: inc state.sim.fallbacks[mover]
-        state.sim.applyAttempt(mover, decision.cell, decision.say, decision.notes,
-          decision.guess, decision.scripted, decision.fellBack or senseFallback)
-        state.recordPhase(simCopy, mover, "attempt", decision, attempts)
+        state.sim.applyAttempt(mover, attemptDecision.cell, attemptDecision.say, attemptDecision.notes,
+          attemptDecision.guess, attemptDecision.scripted, false)
+        state.recordPhase(simCopy, mover, "attempt", attemptDecision, attempts)
         echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover],
-          " plays ", state.sim.cellName(decision.cell), " at ",
+          " plays ", state.sim.cellName(attemptDecision.cell), " at ",
           (getMonoTime() - gameStart).inSeconds, "s"
         state.broadcastLocked()
 
@@ -755,14 +777,15 @@ proc websocketHandler(
               return
             let evidence = payload["training_attempt"]
             let source = payload["source"].getStr()
-            if source notin ["llm", "unknown", "fallback"]:
+            if source notin ["llm", "unknown"]:
               raise newException(FogError, "unknown external action source")
             if evidence.kind != JNull and source != "unknown":
               state.retainExternalAttempt(slot, id, evidence, completed = true)
             elif source == "llm":
               raise newException(FogError, "model action requires native evidence")
             if state.stopping or interruptionRequested() or state.pendingSeat != slot or
-                state.pendingId != id or state.pendingAccepted or receivedAt > state.phaseDeadline:
+                state.pendingId != id or state.pendingAccepted or state.pendingFailed or
+                receivedAt > state.phaseDeadline:
               return
             let phase = $state.pendingPhase
             var attempt = if evidence.kind == JNull:
@@ -772,8 +795,7 @@ proc websocketHandler(
             if evidence.kind == JNull: attempt.response = copy(payload["action"])
             let transportRejection = attempt.rejectionReason
             attempt.rejectionReason = some("external phase proposal not applied")
-            var proposal = if source == "fallback": PhaseProposal()
-              else: state.sim.phaseProposal(slot, $payload["action"], phase, state.pendingSense)
+            var proposal = state.sim.phaseProposal(slot, $payload["action"], phase, state.pendingSense)
             if source == "llm":
               if attempt.response.kind != JString or attempt.rawResponse.kind != JString or
                   attempt.responseComplete != some(true) or attempt.responseReaderJoined != some(true) or
@@ -807,14 +829,11 @@ proc websocketHandler(
               attempt.rejectionReason = none(string)
             else:
               inc state.externalRejections
-              attempt.rejectionReason = some(if source == "fallback": "player fallback" else: proposal.rejection)
-              retry = state.externalRejections == 1 and source != "fallback"
+              attempt.rejectionReason = some(proposal.rejection)
+              retry = state.externalRejections == 1
               if not retry:
-                chosen = state.sim.scriptedPhase(slot, state.baselines[slot], phase, state.pendingSense)
-                state.externalFallback = true
-                websocket.send($(%*{"type": "consumed_rejection", "decision_id": id,
-                  "phase": phase, "reason": attempt.rejectionReason.get(),
-                  "action": state.sim.phaseAction(chosen, phase)}))
+                websocket.send($(%*{"type": "forfeit", "decision_id": id,
+                  "phase": phase, "reason": attempt.rejectionReason.get()}))
             var stored = false
             for existing in state.externalAttempts.mitems:
               if existing.attemptId == attempt.attemptId:
@@ -823,6 +842,9 @@ proc websocketHandler(
             if not stored: state.externalAttempts.add(attempt)
             if retry:
               state.issueExternalPhase(slot, retry = true)
+              return
+            if not proposal.accepted:
+              state.pendingFailed = true
               return
             if state.pendingPhase == epSense: state.pendingSense = chosen.anchor
             else: state.pendingDecision = chosen

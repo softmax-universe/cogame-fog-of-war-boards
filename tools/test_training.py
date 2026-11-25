@@ -195,11 +195,9 @@ with tempfile.TemporaryDirectory() as directory:
                     assert (
                         consumed["kind"] == "consumed_rejection" and consumed["reason"]
                     )
-                    assert set(consumed["action"]) == (
-                        {"sense"}
-                        if variant == "recon-hex-5"
-                        else {"cell", "say", "notes", "guess"}
-                    )
+                    assert consumed["action"] is None
+                    assert consumed["observation"]["kind"] == "terminal"
+                    assert consumed["observation"]["scores"] == {"0": -1.0, "1": 1.0}
                     # Reset before the complete-match check; each phase below starts from an untouched episode.
                     observation = request(
                         {

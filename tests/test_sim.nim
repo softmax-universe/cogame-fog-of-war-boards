@@ -66,6 +66,12 @@ suite "coordinates":
         discard sim.cellIndex("a" & $(size + 1))
       expect FogError:
         discard sim.cellIndex("")
+      expect FogError:
+        discard sim.cellIndex("a+1")
+      expect FogError:
+        discard sim.cellIndex("a_1")
+      expect FogError:
+        discard sim.cellIndex("a-1")
     let five = initSim(fixture(mDarkHex, 5))
     check five.cellIndex("e5") == 24
     check five.rowOf(24) == 4
@@ -250,6 +256,24 @@ suite "endings":
     let before = stopped.events.len
     stopped.endEarly()                          ## idempotent
     check stopped.events.len == before
+
+    ## forfeit: a seat fails to supply a valid action and loses immediately.
+    var forfeited = initSim(fixture(mDarkHex, 5))
+    discard forfeited.beginPly()
+    forfeited.forfeit(0)
+    check forfeited.done
+    check forfeited.reason == "complete"
+    check forfeited.ending == "forfeit"
+    check forfeited.winner == 1
+    check forfeited.score(0) == -1.0
+    check forfeited.score(1) == 1.0
+    check forfeited.events[^1].kind == evEnd
+    check forfeited.events[^1].seat == 0
+    check forfeited.events[^1].reason == "complete"
+    check forfeited.events[^1].ending == "forfeit"
+    let beforeForfeit = forfeited.events.len
+    forfeited.forfeit(1)                        ## idempotent
+    check forfeited.events.len == beforeForfeit
 
 suite "tension":
   test "9. distToWin measures the real distance in both modes":

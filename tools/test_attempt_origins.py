@@ -445,14 +445,31 @@ try:
                             else "completed"
                         )
                         assert len(events[:-1]) == (
-                            8 if variant == "recon-hex-5" else 4
+                            1
+                            if origin
+                            in {
+                                "model-mismatch",
+                                "model-forged-start",
+                                "model-false-start",
+                            }
+                            else (8 if variant == "recon-hex-5" else 4)
                         )
+                        if origin in {
+                            "model-mismatch",
+                            "model-forged-start",
+                            "model-false-start",
+                        }:
+                            assert events[-1]["outcome"]["ending"] == "forfeit"
+                            assert events[-1]["outcome"]["scores"] == [-1.0, 1.0]
                         for decision in events[:-1]:
                             if origin == "model-mismatch":
                                 assert len(decision["attempts"]) == 2
                                 assert (
                                     decision["selected_attempt_id"] is None
-                                    and decision["action_status"] == "fallback"
+                                    and decision["action_status"] == "rejected"
+                                    and decision["executed_action"] is None
+                                    and decision["fallback_origin"] is None
+                                    and decision["terminal"] is True
                                 )
                                 for attempt in decision["attempts"]:
                                     assert (
@@ -465,7 +482,10 @@ try:
                             elif origin in {"model-forged-start", "model-false-start"}:
                                 assert decision["selected_attempt_id"] is None
                                 assert (
-                                    decision["action_status"] == "fallback"
+                                    decision["action_status"] == "rejected"
+                                    and decision["executed_action"] is None
+                                    and decision["fallback_origin"] is None
+                                    and decision["terminal"] is True
                                     and not decision["attempts"]
                                 )
                             elif origin == "model-omitted-join":

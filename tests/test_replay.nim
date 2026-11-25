@@ -93,6 +93,12 @@ proc recordings(): seq[(string, Recording)] =
   stopped.topUp()
   result.add(("deadline/wall-clock", stopped))
 
+  var forfeited = start(fixture(mDarkHex, 5, seed = 12))
+  forfeited.move("c3")
+  forfeited.sim.forfeit(1)
+  forfeited.topUp()
+  result.add(("complete/forfeit", forfeited))
+
 suite "record then re-derive":
   test "18. every ending re-derives frame for frame":
     for (label, rec) in recordings():

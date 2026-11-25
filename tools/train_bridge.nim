@@ -108,7 +108,14 @@ proc step(command: JsonNode): JsonNode =
         "observation": currentDecision()}
     else:
       consumedRejection = proposal.rejection
-      decision = game.scriptedPhase(seat, blProbe, phase, senseAnchor)
+      game.forfeit(seat)
+      retryCount = 0
+      inc decisionId
+      let scores = resultsJson(game)["scores"]
+      let observation = %*{"kind": "terminal", "scores": {"0": scores[0], "1": scores[1]},
+        "utilities": {"0": scores[0], "1": scores[1]}}
+      return %*{"kind": "consumed_rejection", "reason": consumedRejection,
+        "action": newJNull(), "observation": observation}
     retryCount = 0
     action = game.phaseAction(decision, phase)
     if sensePending:

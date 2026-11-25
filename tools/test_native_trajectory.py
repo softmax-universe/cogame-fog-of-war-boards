@@ -293,8 +293,10 @@ for variant in manifest["variants"]:
                         )
                     else:
                         assert (
-                            decision["action_status"] == "fallback"
-                            and decision["fallback_origin"]
+                            decision["action_status"] == "rejected"
+                            and decision["fallback_origin"] is None
+                            and decision["executed_action"] is None
+                            and decision["terminal"] is True
                         )
                         assert decision["selected_attempt_id"] is None
                         assert len(decision["attempts"]) == 2
@@ -311,6 +313,10 @@ for variant in manifest["variants"]:
                             " — you sensed "
                             in decision["attempts"][0]["prompt"][1]["content"]
                         )
+                if failure in {"sense", "attempt"}:
+                    assert events[-1]["outcome"]["ending"] == "forfeit"
+                    assert events[-1]["outcome"]["scores"] == [-1.0, 1.0]
+                    assert events[-1]["outcome"]["fallbacks"] == [0, 0]
                 assert joined == set(calls)
                 for log in logs:
                     log.flush()

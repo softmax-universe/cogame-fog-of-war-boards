@@ -93,7 +93,7 @@ suite "schemas":
       seq[string]) == @["complete", "deadline"]
     check game["results_schema"]["properties"]["ending"]["enum"].to(
       seq[string]) == @["connection", "line", "board-full", "ply-cap",
-      "wall-clock"]
+      "wall-clock", "forfeit"]
     for name in ["scores", "outcome", "stones", "probes", "discovered",
         "guessesMade", "guessAccuracy", "distToWin", "fallbacks", "names"]:
       let property = game["results_schema"]["properties"][name]

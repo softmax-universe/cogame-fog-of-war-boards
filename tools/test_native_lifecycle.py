@@ -331,11 +331,19 @@ for case in (
             )
             continue
         if case in {"malformed-private-json", "malformed-private-schema"}:
-            assert episode["status"] == "completed" and len(events[:-1]) == 4
+            assert (
+                episode["status"] == "completed"
+                and episode["outcome"]["ending"] == "forfeit"
+                and episode["outcome"]["scores"] == [-1.0, 1.0]
+                and len(events[:-1]) == 1
+            )
             for decision in events[:-1]:
                 assert (
-                    decision["action_status"] == "fallback"
+                    decision["action_status"] == "rejected"
                     and decision["selected_attempt_id"] is None
+                    and decision["executed_action"] is None
+                    and decision["fallback_origin"] is None
+                    and decision["terminal"] is True
                 )
                 assert len(decision["attempts"]) == 2
                 for attempt in decision["attempts"]:
@@ -360,7 +368,7 @@ for case in (
                 json.dumps(
                     {
                         "case": case,
-                        "private_attempts": 8,
+                        "private_attempts": 2,
                         "scope": "fixture-only",
                         "source_revision": SOURCE,
                     }
@@ -369,7 +377,7 @@ for case in (
             )
             print(
                 case,
-                "received bytes private; no targets or public error sentinel",
+                "received bytes private; forfeited without fallback or public sentinel",
                 flush=True,
             )
             continue
@@ -416,13 +424,20 @@ for case in (
             print(case, "private-first then public artifacts", flush=True)
             continue
         if case == "repair-deadline":
-            assert episode["status"] == "completed"
+            assert (
+                episode["status"] == "completed"
+                and episode["outcome"]["ending"] == "forfeit"
+                and episode["outcome"]["scores"] == [-1.0, 1.0]
+            )
             decisions = events[:-1]
-            assert len(decisions) == 4 and request_counts == [4, 4]
+            assert len(decisions) == 1 and request_counts == [2, 0]
             for decision in decisions:
                 assert (
-                    decision["action_status"] == "fallback"
+                    decision["action_status"] == "rejected"
                     and decision["selected_attempt_id"] is None
+                    and decision["executed_action"] is None
+                    and decision["fallback_origin"] is None
+                    and decision["terminal"] is True
                 )
                 invalid, timed_out = decision["attempts"]
                 assert invalid["response_complete"] is True

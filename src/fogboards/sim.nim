@@ -121,8 +121,11 @@ proc cellName*(sim: Sim, cell: int): string =
 proc cellIndex*(sim: Sim, name: string): int =
   ## The inverse of `cellName`; raises on anything off-board.
   let text = name.strip().toLowerAscii()
-  if text.len < 2:
+  if text.len < 2 or text[0] notin {'a' .. 'z'}:
     raise newException(FogError, "not a cell name: " & name)
+  for ch in text[1 .. ^1]:
+    if ch notin {'0' .. '9'}:
+      raise newException(FogError, "not a cell name: " & name)
   let col = ord(text[0]) - ord('a')
   var row = -1
   try:
@@ -342,8 +345,8 @@ proc settle*(sim: var Sim, reason, ending: string) =
   sim.reason = reason
   sim.ending = ending
   case ending
-  of "connection", "line":
-    discard   ## the winner was set by the win check that called us
+  of "connection", "line", "forfeit":
+    discard   ## the winner was set by the win/forfeit check that called us
   else:
     let a = sim.trueDistToWin(0)
     let b = sim.trueDistToWin(1)
@@ -354,6 +357,17 @@ proc settle*(sim: var Sim, reason, ending: string) =
   event.ending = ending
   event.scores = @[sim.score(0), sim.score(1)]
   sim.addEvent(event)
+
+proc forfeit*(sim: var Sim, seat: int) =
+  ## A seat failed to supply a valid action (rejected reply, timeout, or
+  ## disconnect) and forfeits the episode to its opponent.
+  if sim.done:
+    return
+  if seat < 0 or seat >= Seats:
+    raise newException(FogError, "forfeit seat out of range: " & $seat)
+  sim.winner = 1 - seat
+  sim.settle("complete", "forfeit")
+  sim.events[^1].seat = seat
 
 proc endEarly*(sim: var Sim) =
   ## The play deadline stopped the episode between plies. The episode is
@@ -675,6 +689,8 @@ proc eventToJson*(event: GameEvent): JsonNode =
       path.add(%cell)
     result["path"] = path
   of evEnd:
+    if event.seat >= 0:
+      result["seat"] = %event.seat
     result["reason"] = %event.reason
     result["ending"] = %event.ending
     var scores = newJArray()
@@ -805,9 +821,17 @@ proc replayMatch*(config: GameConfig, events: seq[GameEvent]): seq[Sim] =
             "do not derive")
     of evEnd:
       if not sim.done:
-        ## A wall-clock stop is not derivable from the attempts alone, so
-        ## it rides in the recording and is applied by the same proc.
-        sim.settle(event.reason, event.ending)
+        if event.ending == "forfeit":
+          let loser =
+            if event.seat >= 0 and event.seat < Seats: event.seat
+            elif event.scores.len == Seats and event.scores[0] < event.scores[1]: 0
+            elif event.scores.len == Seats and event.scores[1] < event.scores[0]: 1
+            else: raise newException(FogError, "forfeit end event missing forfeiting seat")
+          sim.forfeit(loser)
+        else:
+          ## A wall-clock stop is not derivable from the attempts alone, so
+          ## it rides in the recording and is applied by the same proc.
+          sim.settle(event.reason, event.ending)
       elif sim.reason != event.reason or sim.ending != event.ending:
         raise newException(FogError,
           "recorded end " & event.reason & "/" & event.ending &

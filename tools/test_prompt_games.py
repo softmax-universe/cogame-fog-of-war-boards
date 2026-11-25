@@ -99,6 +99,9 @@ def play(variant, seed, wording="canonical", prompt_seed=0, retries=False):
                     {"kind": "step", "decision_id": index, "response": "invalid again"}
                 )
                 assert result["kind"] == "consumed_rejection"
+                assert result["action"] is None
+                assert result["observation"]["kind"] == "terminal"
+                assert result["observation"]["scores"] == {"0": -1.0, "1": 1.0}
             else:
                 result = request(
                     {

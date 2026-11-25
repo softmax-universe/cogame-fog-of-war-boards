@@ -4,7 +4,7 @@
 ## blind, always terminating" is the completion path for this whole
 ## coworld, not a nicety.
 
-import std/[json, monotimes, os, sets, strutils, tables, times, unittest]
+import std/[json, monotimes, options, os, sets, strutils, tables, times, unittest]
 import fogboards/[llm, sim, prompts]
 
 proc fixture(mode = mDarkHex, size = 5, abrupt = true, sense = 0,
@@ -201,10 +201,12 @@ suite "native endpoint availability":
     let mover = sim.beginPly()
     let decision = client.decide(sim, mover, "take the middle", blProbe,
       scripted = false, deadline = getMonoTime() + initDuration(seconds = 1), selection = PromptSelection())
-    check decision.cell == scriptedDecision(sim, mover, blProbe).cell
-    check not decision.fellBack
+    check decision.isSome
+    check decision.get().cell == scriptedDecision(sim, mover, blProbe).cell
+    check not decision.get().fellBack
     let sweep = client.decide(sim, mover, "", blSweep, scripted = true, deadline = getMonoTime() + initDuration(seconds = 1), selection = PromptSelection())
-    check sweep.cell == scriptedDecision(sim, mover, blSweep).cell
+    check sweep.isSome
+    check sweep.get().cell == scriptedDecision(sim, mover, blSweep).cell
 
   test "a scripted seat name is parsed the way the player sends it":
     check parseBaseline("probe") == blProbe
@@ -234,3 +236,65 @@ suite "private phase teacher invariance":
       let first = original.scriptedPhase(0, blProbe, phase, 0)
       let second = changed.scriptedPhase(0, blProbe, phase, 0)
       check original.phaseAction(first, phase) == changed.phaseAction(second, phase)
+
+suite "strict reply parsing":
+  test "accepts bare JSON and single ordinary outer Markdown code fences":
+    var sim = initSim(fixture(mDarkHex, 5, sense = 2))
+    discard sim.beginPly()
+    let bare = sim.phaseProposal(0, """{"cell": "c3"}""", "attempt", 0)
+    check bare.accepted
+    check bare.decision.cell == sim.cellIndex("c3")
+    check bare.decision.say == ""
+    check bare.decision.notes == ""
+    check bare.decision.guess.len == 0
+
+    let explicitNulls = sim.phaseProposal(0,
+      """{"cell": "c3", "say": null, "notes": null, "guess": null}""", "attempt", 0)
+    check explicitNulls.accepted
+    check explicitNulls.decision.cell == sim.cellIndex("c3")
+
+    let plainFence = sim.phaseProposal(0, "```\n{\"cell\": \"c3\", \"say\": \"hi\"}\n```", "attempt", 0)
+    check plainFence.accepted
+    check plainFence.decision.cell == sim.cellIndex("c3")
+    check plainFence.decision.say == "hi"
+
+    let jsonFence = sim.phaseProposal(0, "```json\n{\"cell\": \"c3\"}\n```", "attempt", 0)
+    check jsonFence.accepted
+    check jsonFence.decision.cell == sim.cellIndex("c3")
+
+    let upperJsonFence = sim.phaseProposal(0, "```JSON\r\n{\"sense\": \"b3\"}\r\n```", "sense")
+    check upperJsonFence.accepted
+    check upperJsonFence.decision.anchor == sim.cellIndex("b3")
+
+  test "rejects prose, extra objects, legacy shims, and unexpected fields":
+    var sim = initSim(fixture(mDarkHex, 5, sense = 2))
+    discard sim.beginPly()
+    for bad in [
+      """Here is my move: {"cell": "c3"}""",
+      """{"cell": "c3"} good luck!""",
+      "Here is my move:\n```json\n{\"cell\": \"c3\"}\n```",
+      "```json\n{\"cell\": \"c3\"}\n```\nDone.",
+      """{"cell": "a1"} {"cell": "b2"}""",
+      "```json\n{\"cell\": \"a1\"}\n```\n```json\n{\"cell\": \"b2\"}\n```",
+      "```python\n{\"cell\": \"c3\"}\n```",
+      """{"cell": [2, 2]}""",
+      """{"cell": "c-3"}""",
+      """{"cell": "c3 (center)"}""",
+      """{"cell": "play c3"}""",
+      """{"move": "c3"}""",
+      """{"cell": "c3", "sense": "b3"}""",
+      """{"cell": "c3", "say": 123}""",
+      """{"cell": "c3", "guess": "d3"}""",
+      """["c3"]"""
+    ]:
+      checkpoint bad
+      check not sim.phaseProposal(0, bad, "attempt", 0).accepted
+
+    for badSense in [
+      """{"sense": [1, 2]}""",
+      """{"sense": "b3", "cell": "c3"}""",
+      """{"sense": "b-3"}""",
+      """Sure: {"sense": "b3"}"""
+    ]:
+      checkpoint badSense
+      check not sim.phaseProposal(0, badSense, "sense").accepted

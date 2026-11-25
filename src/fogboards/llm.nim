@@ -420,8 +420,7 @@ proc systemPrompt*(sim: Sim, seat: int, selection: PromptSelection): string =
     " plies at the latest; if nobody has won by then, the seat that is " &
     "closer to winning takes it.\n\n")
   result.add("OUTPUT FORMAT: reply with ONLY one JSON object, nothing " &
-    "else — no analysis, no explanation, no markdown fences. Your reply " &
-    "must begin with the character { and end with }.")
+    "else — no analysis or explanation.")
 
 proc replyContract(sim: Sim, phase: string): string =
   if phase == "sense":
@@ -517,92 +516,35 @@ proc userPrompt*(sim: Sim, seat: int, prompt: string,
 # ---- Reply parsing ----------------------------------------------------------
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## Pulls the first {...} object out of a model response, tolerating
-  ## fences and trailing prose.
-  let start = text.find('{')
-  let stop = text.rfind('}')
-  if start < 0 or stop <= start:
-    var head = text.strip()
-    if head.runeLen > 160:
-      head = head.runeSubStr(0, 160) & "..."
-    raise newException(FogError, "no JSON object in response: " &
-      head.replace("\n", " "))
-  parseJson(text[start .. stop])
+  ## Parses exactly one JSON object, either bare or inside a single ordinary
+  ## outer Markdown code fence (plain or `json`-tagged). Rejects surrounding
+  ## prose, extra objects, and non-object JSON.
+  var body = text.strip()
+  if body.startsWith("```"):
+    let firstNl = body.find('\n')
+    if firstNl < 0:
+      raise newException(FogError, "invalid markdown code fence in response")
+    let tag = body[3 ..< firstNl].strip().toLowerAscii()
+    if tag.len > 0 and tag != "json":
+      raise newException(FogError, "unsupported markdown code fence tag: " & tag)
+    let lastNl = body.rfind('\n')
+    if lastNl <= firstNl or body[lastNl + 1 .. ^1].strip() != "```":
+      raise newException(FogError, "unterminated markdown code fence in response")
+    body = body[firstNl + 1 ..< lastNl].strip()
+  if not body.startsWith("{") or not body.endsWith("}"):
+    raise newException(FogError, "response must be a single JSON object")
+  try:
+    result = parseJson(body)
+  except JsonParsingError:
+    raise newException(FogError, "response must be a single valid JSON object")
+  if result.kind != JObject:
+    raise newException(FogError, "response must be a JSON object")
 
 proc parseCellNode*(sim: Sim, node: JsonNode): int =
-  ## An algebraic string (case-insensitive, spaces and trailing prose
-  ## tolerated) or a two-element [col, row] integer array, 0-based.
-  if node.isNil:
-    raise newException(FogError, "no cell in response")
-  case node.kind
-  of JArray:
-    if node.len != 2:
-      raise newException(FogError, "a cell array must be [col, row]")
-    let col = node[0].getInt(-1)
-    let row = node[1].getInt(-1)
-    if col < 0 or col >= sim.config.size or row < 0 or row >= sim.config.size:
-      raise newException(FogError,
-        "cell [" & $col & ", " & $row & "] is off the board")
-    return row * sim.config.size + col
-  of JString:
-    let text = node.getStr().strip().toLowerAscii()
-    var index = 0
-    while index < text.len and text[index] notin {'a' .. 'z'}:
-      inc index
-    if index >= text.len:
-      raise newException(FogError, "not a cell name: " & node.getStr())
-    let col = ord(text[index]) - ord('a')
-    inc index
-    while index < text.len and text[index] in {' ', '\t', '-', '.', ','}:
-      inc index
-    var digits = ""
-    while index < text.len and text[index] in {'0' .. '9'}:
-      digits.add(text[index])
-      inc index
-    if digits.len == 0:
-      raise newException(FogError, "not a cell name: " & node.getStr())
-    var row = -1
-    try:
-      row = parseInt(digits) - 1
-    except ValueError:
-      raise newException(FogError, "not a cell name: " & node.getStr())
-    if col < 0 or col >= sim.config.size or row < 0 or row >= sim.config.size:
-      raise newException(FogError,
-        "cell is off the board: " & node.getStr())
-    return row * sim.config.size + col
-  else:
-    raise newException(FogError, "a cell must be a name or [col, row]")
-
-proc parseReply*(sim: Sim, seat: int, payload: JsonNode): Decision =
-  ## `cell` (and `sense`, where the variant has one) are required and must
-  ## be legal. `guess`, `say` and `notes` can never make a reply invalid:
-  ## a malformed guess is dropped, over-long text is truncated on a rune
-  ## boundary. The guess exists to put the seat's belief on the record for
-  ## the overlay and the audit; making it fatal would trade the show for a
-  ## fallback.
-  result.anchor = -1
-  result.cell = sim.parseCellNode(payload{"cell"})
-  if sim.config.sense > 0:
-    result.anchor = sim.parseCellNode(payload{"sense"})
-  result.say = cleanText(oneLine(payload{"say"}.getStr()), MaxSayLen)
-  result.notes = cleanText(payload{"notes"}.getStr(), MaxNotesLen)
-  let guess = payload{"guess"}
-  if not guess.isNil and guess.kind == JArray:
-    for entry in guess:
-      if result.guess.len >= MaxGuessCells:
-        break
-      if entry.kind != JString:
-        continue
-      let name = cleanText(entry.getStr(), MaxGuessLen)
-      var cell = -1
-      try:
-        cell = sim.cellIndex(name)
-      except FogError:
-        continue
-      if cell in sim.known[seat] or sim.ownsCell(seat, cell):
-        continue
-      if cell notin result.guess:
-        result.guess.add(cell)
+  ## Strict algebraic cell string (e.g. "c3").
+  if node.isNil or node.kind != JString:
+    raise newException(FogError, "cell must be a string")
+  sim.cellIndex(node.getStr())
 
 # ---- Native sidecar transport -----------------------------------------------
 
@@ -693,7 +635,6 @@ proc completeText(client: LlmClient, system, user: string, slot: int,
     raise newException(FogError, "native transport " & $response.kind)
   let status = response.httpStatus.get()
   if status == 401 or status == 403:
-    client.disabled = true
     raise newException(FogError, "native inference auth failed (" & $status & ")")
   if status == 429:
     raise newException(FogError, "native inference throttled (429)")
@@ -791,14 +732,50 @@ proc phaseAction*(sim: Sim, decision: Decision, phase: string): JsonNode =
 
 proc parsePhaseReply*(sim: Sim, seat: int, payload: JsonNode,
     phase: string, anchor = -1): Decision =
+  if payload.isNil or payload.kind != JObject:
+    raise newException(FogError, "reply must be a JSON object")
   var probe = sim
   if phase == "sense":
+    if not payload.hasKey("sense"):
+      raise newException(FogError, "missing sense field")
+    for key in payload.keys:
+      if key != "sense":
+        raise newException(FogError, "unexpected field in sense reply: " & key)
     result = Decision(anchor: sim.parseCellNode(payload["sense"]), cell: -1)
     probe.applySense(seat, result.anchor)
   elif phase == "attempt":
-    var action = copy(payload)
-    if sim.config.sense > 0: action["sense"] = %sim.cellName(anchor)
-    result = sim.parseReply(seat, action)
+    if not payload.hasKey("cell"):
+      raise newException(FogError, "missing cell field")
+    for key in payload.keys:
+      if key notin ["cell", "guess", "say", "notes"]:
+        raise newException(FogError, "unexpected field in attempt reply: " & key)
+    result.anchor = anchor
+    result.cell = sim.parseCellNode(payload["cell"])
+    if payload.hasKey("say") and payload["say"].kind != JNull:
+      if payload["say"].kind != JString:
+        raise newException(FogError, "say must be a string")
+      result.say = cleanText(oneLine(payload["say"].getStr()), MaxSayLen)
+    if payload.hasKey("notes") and payload["notes"].kind != JNull:
+      if payload["notes"].kind != JString:
+        raise newException(FogError, "notes must be a string")
+      result.notes = cleanText(payload["notes"].getStr(), MaxNotesLen)
+    if payload.hasKey("guess") and payload["guess"].kind != JNull:
+      if payload["guess"].kind != JArray:
+        raise newException(FogError, "guess must be an array of cell names")
+      for entry in payload["guess"]:
+        if result.guess.len >= MaxGuessCells:
+          break
+        if entry.kind != JString:
+          raise newException(FogError, "guess entries must be cell name strings")
+        var cell = -1
+        try:
+          cell = sim.cellIndex(entry.getStr())
+        except FogError:
+          continue
+        if cell in sim.known[seat] or sim.ownsCell(seat, cell):
+          continue
+        if cell notin result.guess:
+          result.guess.add(cell)
     probe.applyAttempt(seat, result.cell, result.say, result.notes,
       result.guess, false, false)
   else: raise newException(ValueError, "unknown Fog decision phase")
@@ -818,12 +795,13 @@ proc phaseProposal*(sim: Sim, seat: int, response: string, phase: string,
     result.rejection = error.msg
 
 proc decidePhase*(client: LlmClient, sim: Sim, seat: int, prompt: string,
-    baseline: Baseline, scripted: bool, phase: string, deadline: MonoTime, selection: PromptSelection, anchor = -1): Decision =
+    baseline: Baseline, scripted: bool, phase: string, deadline: MonoTime, selection: PromptSelection, anchor = -1): Option[Decision] =
   ## The server applies sense before rendering the next private attempt prompt.
+  ## Returns none(Decision) when a model seat fails to produce a valid reply;
+  ## callers forfeit the seat instead of substituting a scripted move.
   client.attempts = @[]
   if scripted or client.disabled:
-    result = scriptedPhase(sim, seat, baseline, phase, anchor)
-    return
+    return some(scriptedPhase(sim, seat, baseline, phase, anchor))
   let system = systemPrompt(sim, seat, selection)
   for index in 0 .. 1:
     if interruptionRequested() or getMonoTime() >= deadline: break
@@ -834,31 +812,28 @@ proc decidePhase*(client: LlmClient, sim: Sim, seat: int, prompt: string,
     try:
       let proposal = phaseProposal(sim, seat, client.completeText(system, user, seat, deadline), phase, anchor)
       if proposal.accepted:
-        result = proposal.decision
-        client.lastAttempt.parsedAction = sim.phaseAction(result, phase)
+        let decision = proposal.decision
+        client.lastAttempt.parsedAction = sim.phaseAction(decision, phase)
         client.lastAttempt.accepted = true
         client.attempts.add(client.lastAttempt)
-        return
+        return some(decision)
       client.lastAttempt.rejectionReason = some(proposal.rejection)
       client.attempts.add(client.lastAttempt)
     except CatchableError as error:
       client.lastAttempt.rejectionReason = some(error.msg)
       client.attempts.add(client.lastAttempt)
       echo "fogboards llm: seat ", seat, " phase ", phase, " attempt ", index, " rejected"
-      if client.disabled: break
-  result = scriptedPhase(sim, seat, baseline, phase, anchor)
-  result.fellBack = true
+  none(Decision)
 
 proc decide*(client: LlmClient, sim: Sim, seat: int, prompt: string,
-    baseline: Baseline, scripted: bool, deadline: MonoTime, selection: PromptSelection): Decision =
+    baseline: Baseline, scripted: bool, deadline: MonoTime, selection: PromptSelection): Option[Decision] =
   ## Offline callers follow the same two phases on their private simulator.
   var after = sim
   var anchor = -1
-  var senseFallback = false
   if sim.config.sense > 0:
     let sense = client.decidePhase(sim, seat, prompt, baseline, scripted, "sense", deadline, selection)
-    anchor = sense.anchor
-    senseFallback = sense.fellBack
+    if sense.isNone:
+      return none(Decision)
+    anchor = sense.get().anchor
     after.applySense(seat, anchor)
-  result = client.decidePhase(after, seat, prompt, baseline, scripted, "attempt", deadline, selection, anchor)
-  result.fellBack = result.fellBack or senseFallback
+  client.decidePhase(after, seat, prompt, baseline, scripted, "attempt", deadline, selection, anchor)

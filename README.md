@@ -62,27 +62,30 @@ Cells are algebraic: files `a`, `b`, `c`… left to right, ranks `1`, `2`,
   scored, so no policy can farm them instead of winning.
 
 `results.reason` is `complete` or `deadline`; the finer `results.ending` is
-`connection`, `line`, `board-full`, `ply-cap` or `wall-clock`. A `deadline`
-episode is fully scored at the stop by the true distance to victory — a
-real result, not a discarded one.
+`connection`, `line`, `board-full`, `ply-cap`, `forfeit` or `wall-clock`. A
+`deadline` episode is fully scored at the stop by the true distance to victory
+— a real result, not a discarded one.
 
 ## Players
 
 Prompt policies send `PLAYER_PROMPT` to the game-hosted Claude path. External
-players receive **their own fogged view** and exact legal choices. In the
-three variants without reconnaissance, they send one cell action:
+players receive **their own fogged view** and exact legal choices via
+`fogboards.player.v4` `decision` frames. In the three variants without
+reconnaissance, they send one cell action:
 
 ```json
-{"type": "action", "id": 1, "cell": "c4", "guess": ["d3", "d4"],
- "say": "his chain has to cross d3", "notes": "proven: c2,d4. route a3-b3-c3-d3-e3."}
+{"type": "action", "decision_id": "fog-0-0-attempt-1", "source": "unknown",
+ "action": {"cell": "c4", "guess": ["d3", "d4"],
+            "say": "his chain has to cross d3",
+            "notes": "proven: c2,d4. route a3-b3-c3-d3-e3."},
+ "training_attempt": null}
 ```
 
-The reconnaissance variant uses two `fogboards.player.v3` observations per
-ply. The `sense` phase accepts `{"type":"action","id":1,"sense":"b3"}`.
-The game reveals that window in a fresh `attempt` observation, including
-updated legal cells and the private referee log. The player then sends a
-cell action with the new decision ID. Each phase has the configured action
-deadline. A missing phase uses the scripted baseline for the whole ply.
+The reconnaissance variant uses two `fogboards.player.v4` decisions per ply.
+The `sense` phase accepts `{"sense":"b3"}` in `action`. The game reveals that
+window in a fresh `attempt` decision, including updated legal cells and the
+private referee log. The player then sends a cell action with the new decision
+ID. Each phase has the configured action deadline.
 
 Field your own policy by reusing the published player runnable:
 
@@ -92,7 +95,9 @@ coworld upload-policy <fog-of-war-boards-image> --name my-fog \
   --secret-env PLAYER_PROMPT="<your strategy>"
 ```
 
-A missing or illegal external action uses the scripted baseline.
+A rejected reply gets one retry with the legal choices; a second invalid reply,
+timeout, or disconnect forfeits the episode to the opponent instead of
+substituting a fallback move.
 
 Two **scripted baselines** ship in the same image, selected with
 `PLAYER_SCRIPTED`:
@@ -179,8 +184,9 @@ serving parity.
 Native prompt and external players now use the same two phases for reconnaissance:
 the engine applies sense, then renders the revealed private window for the move.
 Both phases allow two proposals with the exact game-rendered retry hint. A second
-invalid proposal consumes the engine baseline action. Numeric baseline selection
-remains a separate research mode.
+invalid proposal, timeout, or disconnect forfeits the episode instead of
+substituting a fallback move. Numeric baseline selection remains a separate
+research mode.
 
 Reconnaissance can issue four native requests per ply instead of two. The default
 request spacing increases from four to eight seconds; the timeout admission guard

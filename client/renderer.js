@@ -764,6 +764,9 @@
             return "Complete \u2014 the board is full and no line exists.";
           case "ply-cap":
             return "Complete \u2014 the ply cap; scored on distance.";
+          case "forfeit":
+            return event.seat >= 0 ?
+              who(event.seat) + " forfeited." : "Complete \u2014 forfeit.";
           default: return "Complete.";
         }
       default: return event.kind;
