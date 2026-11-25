@@ -93,7 +93,7 @@ suite "schemas":
       seq[string]) == @["complete", "deadline"]
     check game["results_schema"]["properties"]["ending"]["enum"].to(
       seq[string]) == @["connection", "line", "board-full", "ply-cap",
-      "wall-clock", "forfeit"]
+      "wall-clock"]
     for name in ["scores", "outcome", "stones", "probes", "discovered",
         "guessesMade", "guessAccuracy", "distToWin", "fallbacks", "names"]:
       let property = game["results_schema"]["properties"][name]
@@ -132,10 +132,18 @@ suite "the upload contract":
       "{{FOG_OF_WAR_BOARDS_IMAGE}}"
     doAssert game{"runnable"}{"env"}{"ANTHROPIC_API_KEY_URI"}.isNil,
       "hosted LLM uses the platform sidecar without provider secrets"
+    check game["runnable"]["env"]["COWORLD_LLM_ENABLED"].getStr() == "true"
+    check game["runnable"]["env"]["COWORLD_LLM_MODEL"].getStr().len > 0
     check game["name"].getStr() == "fog-of-war-boards"
     ## The bundled minimum for cpu is "1"; 500m is rejected at upload
     ## (cogame-pistonball 0.1.1, 2026-08-26).
     check manifest["player"].len == 2
+    check manifest["player"][0]["id"].getStr() == "fog-of-war-boards-player"
+    check manifest["player"][0]["env"]["COWORLD_LLM_ENABLED"].getStr() == "true"
+    check manifest["player"][0]["env"]["COWORLD_LLM_MODEL"].getStr().len > 0
+    check not manifest["player"][0]["env"].hasKey("PLAYER_SCRIPTED")
+    check manifest["player"][1]["id"].getStr() == "fog-of-war-boards-scripted"
+    check manifest["player"][1]["env"]["PLAYER_SCRIPTED"].getStr() == "probe"
     for player in manifest["player"]:
       check player["resources"]["limits"]["cpu"].getStr() == "1"
       check player["resources"]["requests"]["cpu"].getStr() == "100m"

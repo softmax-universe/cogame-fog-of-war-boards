@@ -108,12 +108,10 @@ proc step(command: JsonNode): JsonNode =
         "observation": currentDecision()}
     else:
       consumedRejection = proposal.rejection
-      game.forfeit(seat)
       retryCount = 0
       inc decisionId
-      let scores = resultsJson(game)["scores"]
-      let observation = %*{"kind": "terminal", "scores": {"0": scores[0], "1": scores[1]},
-        "utilities": {"0": scores[0], "1": scores[1]}}
+      let observation = %*{"kind": "failed", "reason": consumedRejection,
+        "scores": newJNull(), "utilities": newJNull()}
       return %*{"kind": "consumed_rejection", "reason": consumedRejection,
         "action": newJNull(), "observation": observation}
     retryCount = 0

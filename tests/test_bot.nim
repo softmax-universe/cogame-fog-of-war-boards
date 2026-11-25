@@ -191,19 +191,19 @@ suite "the baselines are legal, blind and bounded":
     check playback >= 13_000
 
 suite "native endpoint availability":
-  test "without a native endpoint every seat uses the baseline":
+  test "without a native endpoint model seats fail while explicit scripted seats work":
     let config = fixture(mDarkHex, 5, seed = 5)
     let client = newLlmClient(config)
-    ## An absent native endpoint makes offline certification use the
-    ## baseline immediately, without network requests or teacher authority.
+    ## An absent native endpoint must fail non-scripted model seats cleanly
+    ## rather than substituting a scripted baseline.
     check client.disabled
     var sim = initSim(config)
     let mover = sim.beginPly()
     let decision = client.decide(sim, mover, "take the middle", blProbe,
       scripted = false, deadline = getMonoTime() + initDuration(seconds = 1), selection = PromptSelection())
-    check decision.isSome
-    check decision.get().cell == scriptedDecision(sim, mover, blProbe).cell
-    check not decision.get().fellBack
+    check decision.isNone
+    check client.lastFailureKind == pfInfraError
+    check "COWORLD_LLM_ENDPOINT" in client.lastFailureReason
     let sweep = client.decide(sim, mover, "", blSweep, scripted = true, deadline = getMonoTime() + initDuration(seconds = 1), selection = PromptSelection())
     check sweep.isSome
     check sweep.get().cell == scriptedDecision(sim, mover, blSweep).cell

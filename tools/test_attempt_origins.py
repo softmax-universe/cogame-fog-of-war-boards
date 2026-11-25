@@ -432,7 +432,13 @@ try:
                     )
                     try:
                         asyncio.run(players(port, origin))
-                        assert game.wait(timeout=35) == 0
+                        expected_fail = origin in {
+                            "model-mismatch",
+                            "model-forged-start",
+                            "model-false-start",
+                        }
+                        exit_code = game.wait(timeout=35)
+                        assert (exit_code != 0) if expected_fail else (exit_code == 0)
                         events = [
                             json.loads(line)
                             for line in (output / "trajectory.jsonl")
@@ -440,29 +446,33 @@ try:
                             .splitlines()
                         ]
                         assert events[-1]["status"] == (
-                            "truncated"
-                            if origin == "model-omitted-join"
-                            else "completed"
+                            "failed"
+                            if expected_fail
+                            else (
+                                "truncated"
+                                if origin == "model-omitted-join"
+                                else "completed"
+                            )
                         )
                         assert len(events[:-1]) == (
                             1
-                            if origin
-                            in {
-                                "model-mismatch",
-                                "model-forged-start",
-                                "model-false-start",
-                            }
+                            if expected_fail
                             else (8 if variant == "recon-hex-5" else 4)
                         )
-                        if origin in {
-                            "model-mismatch",
-                            "model-forged-start",
-                            "model-false-start",
-                        }:
-                            assert events[-1]["outcome"]["ending"] == "forfeit"
-                            assert events[-1]["outcome"]["scores"] == [-1.0, 1.0]
+                        if expected_fail:
+                            assert events[-1]["participant_outcomes"] is None
+                            assert events[-1]["outcome"]["reason"] == "failed"
+                            assert "scores" not in events[-1]["outcome"]
+                            assert (
+                                not (output / "results.json").exists()
+                                and not (output / "replay.json").exists()
+                            )
                         for decision in events[:-1]:
                             if origin == "model-mismatch":
+                                assert (
+                                    events[-1]["outcome"]["failure_category"]
+                                    == "model_rejected"
+                                )
                                 assert len(decision["attempts"]) == 2
                                 assert (
                                     decision["selected_attempt_id"] is None
@@ -480,9 +490,13 @@ try:
                                         attempt["response"]
                                     )
                             elif origin in {"model-forged-start", "model-false-start"}:
+                                assert (
+                                    events[-1]["outcome"]["failure_category"]
+                                    == "infra_error"
+                                )
                                 assert decision["selected_attempt_id"] is None
                                 assert (
-                                    decision["action_status"] == "rejected"
+                                    decision["action_status"] == "missing"
                                     and decision["executed_action"] is None
                                     and decision["fallback_origin"] is None
                                     and decision["terminal"] is True

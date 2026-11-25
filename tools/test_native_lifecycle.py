@@ -33,6 +33,10 @@ for case in (
     "partial-http-post-sigint",
     "partial-http-upload503",
     "completed-http-artifacts",
+    "fenced-json-roundtrip",
+    "ambiguous-object-rejection",
+    "provider-http-401",
+    "unset-endpoint-model-seat",
     "runtime-failure",
     "malformed-private-json",
     "malformed-private-schema",
@@ -91,14 +95,16 @@ for case in (
                 self.wfile.write(body)
                 entered.set()
                 return
-            if case in {"completed-http-artifacts", "paced-deadline"}:
-                user = request["messages"][0]["content"]
-                legal = next(
-                    line
-                    for line in user.splitlines()
-                    if line.startswith("YOUR LEGAL ATTEMPTS:")
-                )
-                cell = re.findall(r"\b[a-e][1-5]\b", legal)[0]
+            if case == "provider-http-401":
+                body = b'{"error": {"message": "invalid api key"}}'
+                self.send_response(401)
+                self.send_header("content-length", str(len(body)))
+                self.send_header("X-Softmax-Llm-Call-Id", str(uuid.uuid4()))
+                self.end_headers()
+                self.wfile.write(body)
+                entered.set()
+                return
+            if case == "ambiguous-object-rejection":
                 body = json.dumps(
                     {
                         "model": "fixture/served",
@@ -106,9 +112,39 @@ for case in (
                         "content": [
                             {
                                 "type": "text",
-                                "text": json.dumps(
-                                    {"cell": cell, "say": "", "notes": "", "guess": []}
-                                ),
+                                "text": '{"cell": "a1"} {"cell": "b2"}',
+                            }
+                        ],
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(body)))
+                self.send_header("X-Softmax-Llm-Call-Id", str(uuid.uuid4()))
+                self.end_headers()
+                self.wfile.write(body)
+                entered.set()
+                return
+            if case in {"completed-http-artifacts", "paced-deadline", "fenced-json-roundtrip"}:
+                user = request["messages"][0]["content"]
+                legal = next(
+                    line
+                    for line in user.splitlines()
+                    if line.startswith("YOUR LEGAL ATTEMPTS:")
+                )
+                cell = re.findall(r"\b[a-e][1-5]\b", legal)[0]
+                reply_text = json.dumps(
+                    {"cell": cell, "say": "", "notes": "", "guess": []}
+                )
+                if case == "fenced-json-roundtrip":
+                    reply_text = f"```json\n{reply_text}\n```"
+                body = json.dumps(
+                    {
+                        "model": "fixture/served",
+                        "stop_reason": "end_turn",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": reply_text,
                             }
                         ],
                     }
@@ -180,6 +216,10 @@ for case in (
         config.update({"maxPlies": 4, "llmTimeoutSeconds": 5})
     if case in {
         "completed-http-artifacts",
+        "fenced-json-roundtrip",
+        "ambiguous-object-rejection",
+        "provider-http-401",
+        "unset-endpoint-model-seat",
         "malformed-private-json",
         "malformed-private-schema",
     }:
@@ -220,6 +260,8 @@ for case in (
         )
     if case == "runtime-failure":
         env["COWORLD_LLM_PLY_SPACING_SECONDS"] = "invalid-spacing-config"
+    if case == "unset-endpoint-model-seat":
+        env.pop("COWORLD_LLM_ENDPOINT", None)
     processes, logs = [], []
     try:
         game_log = (output / "game.log").open("w")
@@ -252,13 +294,17 @@ for case in (
                     stderr=player_log,
                 )
             )
-        if case != "runtime-failure":
+        if case not in {"runtime-failure", "unset-endpoint-model-seat"}:
             assert entered.wait(5), "game-owned HTTP request was not observed"
         time.sleep(0.05)
         stopped_at = time.monotonic()
         if case not in {
             "repair-deadline",
             "completed-http-artifacts",
+            "fenced-json-roundtrip",
+            "ambiguous-object-rejection",
+            "provider-http-401",
+            "unset-endpoint-model-seat",
             "runtime-failure",
             "malformed-private-json",
             "malformed-private-schema",
@@ -275,6 +321,10 @@ for case in (
             in {
                 "repair-deadline",
                 "completed-http-artifacts",
+                "fenced-json-roundtrip",
+                "ambiguous-object-rejection",
+                "provider-http-401",
+                "unset-endpoint-model-seat",
                 "malformed-private-json",
                 "malformed-private-schema",
                 "paced-deadline",
@@ -283,7 +333,17 @@ for case in (
         )
         assert (
             (exit_code != 0)
-            if case in {"partial-http-upload503", "runtime-failure"}
+            if case
+            in {
+                "partial-http-upload503",
+                "runtime-failure",
+                "malformed-private-json",
+                "malformed-private-schema",
+                "repair-deadline",
+                "ambiguous-object-rejection",
+                "provider-http-401",
+                "unset-endpoint-model-seat",
+            }
             else (exit_code == 0)
         ), exit_code
         elapsed = time.monotonic() - stopped_at
@@ -330,22 +390,89 @@ for case in (
                 flush=True,
             )
             continue
+        if case == "fenced-json-roundtrip":
+            assert episode["status"] == "completed" and len(events[:-1]) == 4
+            assert all(decision["selected_attempt_id"] for decision in events[:-1])
+            results = json.loads((output / "results.json").read_text())
+            assert results["reason"] == "complete" and results["plies"] == 4
+            assert (output / "replay.json").exists()
+            print(case, "fenced JSON accepted and completed", flush=True)
+            continue
+        if case == "ambiguous-object-rejection":
+            assert (
+                episode["status"] == "failed"
+                and episode["participant_outcomes"] is None
+                and episode["outcome"]["reason"] == "failed"
+                and episode["outcome"]["failure_category"] == "model_rejected"
+                and "scores" not in episode["outcome"]
+                and len(events[:-1]) == 1
+            )
+            assert (
+                not (output / "results.json").exists()
+                and not (output / "replay.json").exists()
+            )
+            decision = events[0]
+            assert (
+                decision["action_status"] == "rejected"
+                and decision["selected_attempt_id"] is None
+                and decision["executed_action"] is None
+                and decision["fallback_origin"] is None
+                and decision["terminal"] is True
+                and len(decision["attempts"]) == 2
+            )
+            print(case, "ambiguous multi-object rejected and failed unscored", flush=True)
+            continue
+        if case in {"provider-http-401", "unset-endpoint-model-seat"}:
+            assert (
+                episode["status"] == "failed"
+                and episode["participant_outcomes"] is None
+                and episode["outcome"]["reason"] == "failed"
+                and episode["outcome"]["failure_category"] == "infra_error"
+                and "scores" not in episode["outcome"]
+                and len(events[:-1]) == 1
+            )
+            assert (
+                not (output / "results.json").exists()
+                and not (output / "replay.json").exists()
+            )
+            decision = events[0]
+            assert (
+                decision["action_status"] == "missing"
+                and decision["selected_attempt_id"] is None
+                and decision["executed_action"] is None
+                and decision["fallback_origin"] is None
+                and decision["terminal"] is True
+            )
+            if case == "provider-http-401":
+                assert len(decision["attempts"]) == 1
+                assert decision["attempts"][0]["http_status"] == 401
+                assert "401" in decision["attempts"][0]["rejection_reason"]
+            else:
+                assert decision["attempts"] == []
+            print(case, "infra failure terminated unscored with no fallback", flush=True)
+            continue
         if case in {"malformed-private-json", "malformed-private-schema"}:
             assert (
-                episode["status"] == "completed"
-                and episode["outcome"]["ending"] == "forfeit"
-                and episode["outcome"]["scores"] == [-1.0, 1.0]
+                episode["status"] == "failed"
+                and episode["participant_outcomes"] is None
+                and episode["outcome"]["reason"] == "failed"
+                and episode["outcome"]["failure_category"] == "infra_error"
+                and "scores" not in episode["outcome"]
                 and len(events[:-1]) == 1
+            )
+            assert (
+                not (output / "results.json").exists()
+                and not (output / "replay.json").exists()
             )
             for decision in events[:-1]:
                 assert (
-                    decision["action_status"] == "rejected"
+                    decision["action_status"] == "missing"
                     and decision["selected_attempt_id"] is None
                     and decision["executed_action"] is None
                     and decision["fallback_origin"] is None
                     and decision["terminal"] is True
                 )
-                assert len(decision["attempts"]) == 2
+                assert len(decision["attempts"]) == 1
                 for attempt in decision["attempts"]:
                     assert not attempt["accepted"] and attempt["response"] is None
                     assert "private-schema-sentinel" in attempt["raw_response"]
@@ -363,12 +490,11 @@ for case in (
                 "private-schema-sentinel" not in path.read_text()
                 for path in output.glob("*.log")
             )
-            assert "private-schema-sentinel" not in (output / "replay.json").read_text()
             (output / "proof.json").write_text(
                 json.dumps(
                     {
                         "case": case,
-                        "private_attempts": 2,
+                        "private_attempts": 1,
                         "scope": "fixture-only",
                         "source_revision": SOURCE,
                     }
@@ -377,7 +503,7 @@ for case in (
             )
             print(
                 case,
-                "received bytes private; forfeited without fallback or public sentinel",
+                "received bytes private; failed unscored without fallback or public sentinel",
                 flush=True,
             )
             continue
@@ -425,15 +551,21 @@ for case in (
             continue
         if case == "repair-deadline":
             assert (
-                episode["status"] == "completed"
-                and episode["outcome"]["ending"] == "forfeit"
-                and episode["outcome"]["scores"] == [-1.0, 1.0]
+                episode["status"] == "failed"
+                and episode["participant_outcomes"] is None
+                and episode["outcome"]["reason"] == "failed"
+                and episode["outcome"]["failure_category"] == "infra_error"
+                and "scores" not in episode["outcome"]
+            )
+            assert (
+                not (output / "results.json").exists()
+                and not (output / "replay.json").exists()
             )
             decisions = events[:-1]
             assert len(decisions) == 1 and request_counts == [2, 0]
             for decision in decisions:
                 assert (
-                    decision["action_status"] == "rejected"
+                    decision["action_status"] == "missing"
                     and decision["selected_attempt_id"] is None
                     and decision["executed_action"] is None
                     and decision["fallback_origin"] is None

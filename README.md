@@ -62,7 +62,7 @@ Cells are algebraic: files `a`, `b`, `c`… left to right, ranks `1`, `2`,
   scored, so no policy can farm them instead of winning.
 
 `results.reason` is `complete` or `deadline`; the finer `results.ending` is
-`connection`, `line`, `board-full`, `ply-cap`, `forfeit` or `wall-clock`. A
+`connection`, `line`, `board-full`, `ply-cap` or `wall-clock`. A
 `deadline` episode is fully scored at the stop by the true distance to victory
 — a real result, not a discarded one.
 
@@ -96,8 +96,8 @@ coworld upload-policy <fog-of-war-boards-image> --name my-fog \
 ```
 
 A rejected reply gets one retry with the legal choices; a second invalid reply,
-timeout, or disconnect forfeits the episode to the opponent instead of
-substituting a fallback move.
+missing `COWORLD_LLM_ENDPOINT`, provider/transport error, timeout, or disconnect
+terminates the episode unscored as failed instead of substituting a fallback move.
 
 Two **scripted baselines** ship in the same image, selected with
 `PLAYER_SCRIPTED`:
@@ -111,9 +111,9 @@ Two **scripted baselines** ship in the same image, selected with
 
 Both are always legal, both are blind (a test flips every cell they cannot
 legitimately see and asserts they decide identically), and they disagree on
-~70 % of plies. With no LLM credentials at all every seat plays `probe`
-immediately — which is what makes offline certification and the CI smoke
-complete without a key.
+~70 % of plies. Prompt seats require `COWORLD_LLM_ENDPOINT` and never fall back
+silently to `probe`; offline CI smoke explicitly selects `PLAYER_SCRIPTED=probe`
+when no LLM endpoint is configured.
 
 ## Watchability
 
@@ -184,8 +184,8 @@ serving parity.
 Native prompt and external players now use the same two phases for reconnaissance:
 the engine applies sense, then renders the revealed private window for the move.
 Both phases allow two proposals with the exact game-rendered retry hint. A second
-invalid proposal, timeout, or disconnect forfeits the episode instead of
-substituting a fallback move. Numeric baseline selection remains a separate
+invalid proposal, missing endpoint, provider/transport error, timeout, or disconnect
+terminates the episode unscored as failed instead of substituting a fallback move. Numeric baseline selection remains a separate
 research mode.
 
 Reconnaissance can issue four native requests per ply instead of two. The default

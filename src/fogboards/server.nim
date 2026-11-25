@@ -83,11 +83,16 @@ type
     pendingDecision: Decision
     pendingAccepted: bool
     pendingFailed: bool
+    pendingFailureCategory: string
+    pendingFailureReason: string
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
     started: bool
     finished: bool
+    episodeFailed: bool
+    episodeFailureCategory: string
+    episodeFailureReason: string
 
 var
   stateLock: Lock
@@ -281,12 +286,19 @@ proc issueExternalPhase(gs: var GameState, seat: int, retry: bool) =
         "reason": "phase proposal rejected", "observation": decision}))
     else: gs.playerSockets[seat].send($decision)
 
-proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime, failed = false) =
+proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime,
+    failed = false, failureCategory = "", failureReason = "") =
   let cleanupDeadline = min(episodeDeadline, getMonoTime() + initDuration(seconds = 5))
   var interrupted = interruptionRequested() or failed
   var targets: seq[int]
   withLock stateLock:
     if state.finished: return
+    if failed:
+      state.episodeFailed = true
+      if failureCategory.len > 0: state.episodeFailureCategory = failureCategory
+      elif state.episodeFailureCategory.len == 0: state.episodeFailureCategory = "runtime_error"
+      if failureReason.len > 0: state.episodeFailureReason = failureReason
+      elif state.episodeFailureReason.len == 0: state.episodeFailureReason = "episode failed"
     state.stopping = true
     state.stopId = ""
     for byte in urandom(16): state.stopId.add(toHex(byte, 2).toLowerAscii())
@@ -316,8 +328,17 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime, fail
     results = state.sim.resultsJson()
     var cleanup = newJObject()
     for slot in targets: cleanup[$slot] = %(if slot in state.stoppedSlots: "joined" else: "unresolved")
-    privateOutcome = copy(results)
-    privateOutcome["player_cleanup"] = cleanup
+    if failed:
+      privateOutcome = %*{
+        "reason": "failed",
+        "failure_category": state.episodeFailureCategory,
+        "failure_reason": state.episodeFailureReason,
+        "plies": state.sim.plies,
+        "player_cleanup": cleanup
+      }
+    else:
+      privateOutcome = copy(results)
+      privateOutcome["player_cleanup"] = cleanup
     replayData = state.replayPayload(results)
     if state.trajectory.isSome:
       for pending in state.pendingPhases:
@@ -386,6 +407,8 @@ proc awaitExternalPhase(sim: Sim, mover: int, phase: ExternalPhase,
       state.phaseDeadline = deadline
       state.pendingAccepted = false
       state.pendingFailed = false
+      state.pendingFailureCategory = ""
+      state.pendingFailureReason = ""
       state.externalAttempts = @[]
       state.externalRejections = 0
       if phase == epSense: state.pendingSense = -1
@@ -401,13 +424,20 @@ proc awaitExternalPhase(sim: Sim, mover: int, phase: ExternalPhase,
     withLock stateLock:
       result = state.pendingAccepted
       if not result:
+        let reason =
+          if interruptionRequested(): "native_interrupted"
+          elif state.pendingFailed and state.pendingFailureReason.len > 0: state.pendingFailureReason
+          elif not state.playerSockets.hasKey(mover): "player_disconnected"
+          else: "phase_deadline"
+        state.pendingFailureCategory =
+          if interruptionRequested(): "interrupted"
+          elif state.pendingFailed: "model_rejected"
+          else: "infra_error"
+        state.pendingFailureReason = reason
         for attempt in state.externalAttempts.mitems:
           attempt.accepted = false
           if attempt.rejectionReason.isNone:
-            attempt.rejectionReason = some(
-              if interruptionRequested(): "native_interrupted"
-              elif not state.playerSockets.hasKey(mover): "player_disconnected"
-              else: "phase_deadline")
+            attempt.rejectionReason = some(reason)
       state.pendingSeat = -1
       state.pendingPhase = epNone
 
@@ -478,6 +508,9 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
     let guard = config.worstPlySeconds()
     let spacing = config.plySpacing()
     var lastLlmStart = none(MonoTime)
+    var episodeFailed = false
+    var failureCategory = ""
+    var failureReason = ""
 
     while true:
       var simCopy: Sim
@@ -512,7 +545,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       ## Configured pacing bounds starts of native/external plies.
       ## Scripted seats proceed immediately. Recheck the phase budget after
       ## waiting, before rendering or applying another decision.
-      let usesLlm = seatExternal or not (seatScripted or client.disabled)
+      let usesLlm = seatExternal or not seatScripted
       if usesLlm and lastLlmStart.isSome:
         waitUntil(min(playDeadline, lastLlmStart.get() + initDuration(milliseconds = int64(spacing * 1000))))
       if interruptionRequested(): break
@@ -534,10 +567,16 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             attempts = state.externalAttempts
             if accepted:
               sense = some(Decision(anchor: state.pendingSense, cell: -1))
+            else:
+              failureCategory = state.pendingFailureCategory
+              failureReason = state.pendingFailureReason
         else:
           sense = client.decidePhase(simCopy, mover, seatPrompt, seatBaseline,
             seatScripted, "sense", min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)), state.selection)
           attempts = client.attempts
+          if sense.isNone:
+            failureCategory = $client.lastFailureKind
+            failureReason = client.lastFailureReason
         if interruptionRequested():
           withLock stateLock:
             for attempt in attempts.mitems:
@@ -546,12 +585,14 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             state.recordPhase(simCopy, mover, "sense", Decision(), attempts, applied = false)
           break
         if sense.isNone:
+          let isModelRejected = failureCategory == "model_rejected"
           withLock stateLock:
             if state.sim.done: break
-            state.sim.forfeit(mover)
-            state.recordPhase(simCopy, mover, "sense", Decision(), attempts, applied = false, rejected = true)
-            echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover], " forfeited in sense phase"
-            state.broadcastLocked()
+            state.recordPhase(simCopy, mover, "sense", Decision(), attempts,
+              applied = false, rejected = isModelRejected)
+            echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover],
+              " failed in sense phase (", failureCategory, ")"
+          episodeFailed = true
           break
         let senseDecision = sense.get()
         anchor = senseDecision.anchor
@@ -570,10 +611,16 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           attempts = state.externalAttempts
           if accepted:
             decision = some(state.pendingDecision)
+          else:
+            failureCategory = state.pendingFailureCategory
+            failureReason = state.pendingFailureReason
       else:
         decision = client.decidePhase(simCopy, mover, seatPrompt, seatBaseline,
           seatScripted, "attempt", min(playDeadline, getMonoTime() + initDuration(seconds = config.llmTimeoutSeconds)), state.selection, anchor)
         attempts = client.attempts
+        if decision.isNone:
+          failureCategory = $client.lastFailureKind
+          failureReason = client.lastFailureReason
       if interruptionRequested():
         withLock stateLock:
           for attempt in attempts.mitems:
@@ -582,12 +629,14 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           state.recordPhase(simCopy, mover, "attempt", Decision(), attempts, applied = false)
         break
       if decision.isNone:
+        let isModelRejected = failureCategory == "model_rejected"
         withLock stateLock:
           if state.sim.done: break
-          state.sim.forfeit(mover)
-          state.recordPhase(simCopy, mover, "attempt", Decision(), attempts, applied = false, rejected = true)
-          echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover], " forfeited in attempt phase"
-          state.broadcastLocked()
+          state.recordPhase(simCopy, mover, "attempt", Decision(), attempts,
+            applied = false, rejected = isModelRejected)
+          echo "fogboards: ply ", state.sim.plies, " ", state.sim.names[mover],
+            " failed in attempt phase (", failureCategory, ")"
+        episodeFailed = true
         break
       let attemptDecision = decision.get()
       withLock stateLock:
@@ -602,6 +651,12 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
 
       if config.turnDelayMs > 0:
         waitUntil(min(playDeadline, getMonoTime() + initDuration(milliseconds = config.turnDelayMs)))
+
+    if episodeFailed:
+      finalizationStarted = true
+      finishEpisode(runtimeConfig, episodeDeadline, failed = true,
+        failureCategory = failureCategory, failureReason = failureReason)
+      return
 
     ## Let the verdict land before the final frame.
     if config.turnDelayMs > 0:
@@ -832,7 +887,8 @@ proc websocketHandler(
               attempt.rejectionReason = some(proposal.rejection)
               retry = state.externalRejections == 1
               if not retry:
-                websocket.send($(%*{"type": "forfeit", "decision_id": id,
+                state.pendingFailureReason = attempt.rejectionReason.get()
+                websocket.send($(%*{"type": "failed", "decision_id": id,
                   "phase": phase, "reason": attempt.rejectionReason.get()}))
             var stored = false
             for existing in state.externalAttempts.mitems:
@@ -962,6 +1018,9 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
   state.external = newSeq[bool](config.players.len)
   state.registered = newSeq[bool](config.players.len)
   state.pendingSeat = -1
+  state.episodeFailed = false
+  state.episodeFailureCategory = ""
+  state.episodeFailureReason = ""
   runtimeConfigGlobal = runtimeConfig
 
   let router = buildRouter(replayMode = false)
@@ -982,3 +1041,5 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
       joinThread(gameThread)
     else:
       finishEpisode(runtimeConfig, getMonoTime() + initDuration(seconds = 5), failed = not wasInterrupted)
+  if state.episodeFailed:
+    quit("fogboards: episode failed (" & state.episodeFailureCategory & ")", 1)

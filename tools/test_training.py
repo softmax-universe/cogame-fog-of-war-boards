@@ -196,8 +196,9 @@ with tempfile.TemporaryDirectory() as directory:
                         consumed["kind"] == "consumed_rejection" and consumed["reason"]
                     )
                     assert consumed["action"] is None
-                    assert consumed["observation"]["kind"] == "terminal"
-                    assert consumed["observation"]["scores"] == {"0": -1.0, "1": 1.0}
+                    assert consumed["observation"]["kind"] == "failed"
+                    assert consumed["observation"]["scores"] is None
+                    assert consumed["observation"]["utilities"] is None
                     # Reset before the complete-match check; each phase below starts from an untouched episode.
                     observation = request(
                         {
