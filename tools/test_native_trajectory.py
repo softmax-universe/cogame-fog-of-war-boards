@@ -221,7 +221,11 @@ for variant in manifest["variants"]:
                             [PLAYER], cwd=ROOT, env=player_env, stdout=log, stderr=log
                         )
                     )
-                assert game.wait(timeout=30) == 0, (output / "game.log").read_text()
+                expected_fail = failure in {"sense", "attempt"}
+                exit_code = game.wait(timeout=30)
+                assert (exit_code != 0) if expected_fail else (exit_code == 0), (
+                    output / "game.log"
+                ).read_text()
                 for process in processes[1:]:
                     assert process.wait(timeout=5) == 0
                 events = [
@@ -229,10 +233,23 @@ for variant in manifest["variants"]:
                     for line in (output / "trajectory.jsonl").read_text().splitlines()
                 ]
                 decisions = events[:-1]
-                assert (
-                    events[-1]["status"] == "completed"
-                    and events[-1]["outcome"]["reason"] == "complete"
-                )
+                if expected_fail:
+                    assert (
+                        events[-1]["status"] == "failed"
+                        and events[-1]["participant_outcomes"] is None
+                        and events[-1]["outcome"]["reason"] == "failed"
+                        and events[-1]["outcome"]["failure_category"] == "model_rejected"
+                        and "scores" not in events[-1]["outcome"]
+                    )
+                    assert (
+                        not (output / "results.json").exists()
+                        and not (output / "replay.json").exists()
+                    )
+                else:
+                    assert (
+                        events[-1]["status"] == "completed"
+                        and events[-1]["outcome"]["reason"] == "complete"
+                    )
                 assert events[-1]["source_revision"] == source
                 joined = set()
                 for decision in decisions:
@@ -293,8 +310,10 @@ for variant in manifest["variants"]:
                         )
                     else:
                         assert (
-                            decision["action_status"] == "fallback"
-                            and decision["fallback_origin"]
+                            decision["action_status"] == "rejected"
+                            and decision["fallback_origin"] is None
+                            and decision["executed_action"] is None
+                            and decision["terminal"] is True
                         )
                         assert decision["selected_attempt_id"] is None
                         assert len(decision["attempts"]) == 2
@@ -319,12 +338,13 @@ for variant in manifest["variants"]:
                     "private-guidance-fixture" not in public_logs
                     and "private-notes-fixture" not in public_logs
                 )
-                replay = (output / "replay.json").read_text()
-                assert (
-                    "private-guidance-fixture" not in replay
-                    and "private-notes-fixture" not in replay
-                )
-                assert all(identity not in replay for identity in calls)
+                if not expected_fail:
+                    replay = (output / "replay.json").read_text()
+                    assert (
+                        "private-guidance-fixture" not in replay
+                        and "private-notes-fixture" not in replay
+                    )
+                    assert all(identity not in replay for identity in calls)
                 assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
                 print(
                     variant["id"],

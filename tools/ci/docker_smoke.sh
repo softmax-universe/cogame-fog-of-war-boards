@@ -162,11 +162,15 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
 
+offline_scripted = not bool(os.environ.get("COWORLD_LLM_ENDPOINT"))
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    env_map = dict(entry.get("env") or {})
+    if offline_scripted and not env_map.get("PLAYER_SCRIPTED"):
+        env_map["PLAYER_SCRIPTED"] = "probe"
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in env_map.items():
         env_args += ["-e", f"{key}={value}"]
     for kv in extra_env:
         env_args += ["-e", kv]
@@ -191,11 +195,14 @@ chmod 777 "${work_dir}"
 docker network create "${network}" >/dev/null
 
 game_env=()
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  game_env+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
-  echo "ANTHROPIC_API_KEY present: the LLM path will be exercised"
+if [ -n "${COWORLD_LLM_ENDPOINT:-}" ]; then
+  game_env+=(-e "COWORLD_LLM_ENDPOINT=${COWORLD_LLM_ENDPOINT}")
+  if [ -n "${COWORLD_LLM_MODEL:-}" ]; then
+    game_env+=(-e "COWORLD_LLM_MODEL=${COWORLD_LLM_MODEL}")
+  fi
+  echo "COWORLD_LLM_ENDPOINT present: the LLM path will be exercised"
 else
-  echo "no ANTHROPIC_API_KEY: the game must complete on its scripted baselines"
+  echo "no COWORLD_LLM_ENDPOINT: offline smoke explicitly uses PLAYER_SCRIPTED=probe for non-scripted seats"
 fi
 
 echo "starting game container (${image} ${game_bin}) ..."

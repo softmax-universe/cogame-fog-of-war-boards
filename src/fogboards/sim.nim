@@ -121,8 +121,11 @@ proc cellName*(sim: Sim, cell: int): string =
 proc cellIndex*(sim: Sim, name: string): int =
   ## The inverse of `cellName`; raises on anything off-board.
   let text = name.strip().toLowerAscii()
-  if text.len < 2:
+  if text.len < 2 or text[0] notin {'a' .. 'z'}:
     raise newException(FogError, "not a cell name: " & name)
+  for ch in text[1 .. ^1]:
+    if ch notin {'0' .. '9'}:
+      raise newException(FogError, "not a cell name: " & name)
   let col = ord(text[0]) - ord('a')
   var row = -1
   try:
@@ -675,6 +678,8 @@ proc eventToJson*(event: GameEvent): JsonNode =
       path.add(%cell)
     result["path"] = path
   of evEnd:
+    if event.seat >= 0:
+      result["seat"] = %event.seat
     result["reason"] = %event.reason
     result["ending"] = %event.ending
     var scores = newJArray()

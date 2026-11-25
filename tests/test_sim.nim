@@ -66,6 +66,12 @@ suite "coordinates":
         discard sim.cellIndex("a" & $(size + 1))
       expect FogError:
         discard sim.cellIndex("")
+      expect FogError:
+        discard sim.cellIndex("a+1")
+      expect FogError:
+        discard sim.cellIndex("a_1")
+      expect FogError:
+        discard sim.cellIndex("a-1")
     let five = initSim(fixture(mDarkHex, 5))
     check five.cellIndex("e5") == 24
     check five.rowOf(24) == 4

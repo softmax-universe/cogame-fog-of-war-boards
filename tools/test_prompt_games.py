@@ -99,6 +99,10 @@ def play(variant, seed, wording="canonical", prompt_seed=0, retries=False):
                     {"kind": "step", "decision_id": index, "response": "invalid again"}
                 )
                 assert result["kind"] == "consumed_rejection"
+                assert result["action"] is None
+                assert result["observation"]["kind"] == "failed"
+                assert result["observation"]["scores"] is None
+                assert result["observation"]["utilities"] is None
             else:
                 result = request(
                     {
@@ -113,10 +117,13 @@ def play(variant, seed, wording="canonical", prompt_seed=0, retries=False):
             )
             observation = result["observation"]
         assert 0 < len(trace) <= (100 if variant == "recon-hex-5" else 50)
-        assert (
-            set(observation["scores"]) == {"0", "1"}
-            and sum(observation["scores"].values()) == 0
-        )
+        if retries:
+            assert observation["kind"] == "failed" and observation["scores"] is None
+        else:
+            assert (
+                set(observation["scores"]) == {"0", "1"}
+                and sum(observation["scores"].values()) == 0
+            )
         process.stdin.close()
         assert process.wait(timeout=5) == 0
         return trace, observation, systems
